@@ -11,6 +11,11 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link rel="stylesheet" href="tournament.css">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0b0d12">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 </head>
 <body>
 
@@ -234,6 +239,36 @@
       <div class="section-note">Pulls each tracked player's finished games at this exact time control and tallies wins, draws and losses (optionally only games after the date and time above) — a running scoreboard for a Rapid or Blitz tournament as results arrive on Chess.com.</div>
 
       <hr class="div">
+    </div>
+
+    <hr class="div">
+    <div id="syncSection">
+      <div class="section-label">Sync across devices</div>
+      <div class="section-note">Use the same tournament on your phone, PC and display. No separate logins: the sync key is the only password.</div>
+      <div class="field">
+        <label for="syncType">Storage</label>
+        <select id="syncType" class="form-select">
+          <option value="worker">Cloudflare server (Worker)</option>
+          <option value="firebase">Firebase Realtime Database</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="syncUrl" id="syncUrlLabel">Server URL</label>
+        <input id="syncUrl" type="url" class="form-control" placeholder="https://bracket-sync.your-name.workers.dev" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="syncKey">Sync key</label>
+        <div class="inline">
+          <input id="syncKey" type="password" class="form-control" autocomplete="off" placeholder="Click Generate on your first device">
+          <button type="button" class="btn" id="syncGenBtn">Generate</button>
+        </div>
+      </div>
+      <div class="util-row">
+        <button type="button" class="btn btn-accent" id="syncConnectBtn">Connect</button>
+        <button type="button" class="btn" id="syncCopyBtn" style="display:none;">Copy link for another device</button>
+        <button type="button" class="btn btn-ghost" id="syncDisconnectBtn" style="display:none;">Disconnect</button>
+      </div>
+      <div class="section-note" id="syncStatus" data-sync="off">Not connected. Data is saved on this device only.</div>
     </div>
 
     <div class="util-row">

@@ -610,3 +610,8 @@ body.locked-view .exit-present-bar{ display: none !important; }
 .fn-baseline-prompt{display:grid;gap:10px;justify-items:start;padding:16px;margin:8px 0 24px;border:1px dashed rgba(255,255,255,.2);border-radius:10px;background:rgba(255,255,255,.03)}
 .fn-baseline-title{font-weight:600}
 .fn-gen-setup{margin:4px 0 14px;padding:12px;border:1px solid rgba(255,255,255,.1);border-radius:10px;background:rgba(255,255,255,.03)}
+
+/* ---- Cross-device sync status ---- */
+#syncStatus[data-sync="ok"]{color:#4ade80}
+#syncStatus[data-sync="offline"], #syncStatus[data-sync="error"]{color:var(--lose,#ff5d6c)}
+#syncSection .inline{display:flex;gap:8px;align-items:center}

@@ -32,6 +32,20 @@
   var adminAddSubmitBtn = document.getElementById('adminAddSubmitBtn');
   var adminMenuLogoutBtn = document.getElementById('adminMenuLogoutBtn');
 
+  // A "#sync=<code>" link (made by "Copy link for another device") configures this
+  // device for shared sync, then removes the secret from the address bar.
+  (function applyLaunchSync(){
+    var m = /^#sync=([A-Za-z0-9_-]+)/.exec(location.hash);
+    if(!m) return;
+    try{
+      var cfg = JSON.parse(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if(cfg && cfg.u && cfg.k){
+        localStorage.setItem('bracket_room_sync_v1', JSON.stringify({ url: String(cfg.u), key: String(cfg.k), type: cfg.t === 'firebase' ? 'firebase' : 'worker' }));
+      }
+    }catch(e){}
+    try{ history.replaceState(null, '', location.pathname + location.search); }catch(e){}
+  })();
+
   var isPresentLink = location.hash === '#present' || location.hash === '#present-live';
   if(isPresentLink){
     // A present/view-only link is meant to be shared — requiring an admin
@@ -41,6 +55,16 @@
     adminMenuWrap.style.display = 'none';
     return;
   }
+
+  // Shared sync replaces per-device logins: the sync key is the only credential.
+  try{
+    var syncCfgRaw = JSON.parse(localStorage.getItem('bracket_room_sync_v1') || 'null');
+    if(syncCfgRaw && syncCfgRaw.url && syncCfgRaw.key){
+      document.body.classList.add('unlocked');
+      adminMenuWrap.style.display = 'none';
+      return;
+    }
+  }catch(e){}
 
   var storageAvailable = false;
   try{
@@ -2347,13 +2371,8 @@
     document.body.classList.remove('present');
   });
 
-  // Keep a presentation tab live-synced with whatever changes in the main tab,
-  // using the storage event that fires automatically in *other* tabs when localStorage changes.
-  window.addEventListener('storage', function(e){
-    if(e.key !== STORAGE_KEY || !e.newValue) return;
-    try{
-      state = JSON.parse(e.newValue);
-      normalizeState();
+  // Re-renders every view from the current `state` (used by the other-tab storage event and by remote sync).
+  function refreshAllFromState(){
       renderTeamList();
       renderChessUserList();
       renderFnUserList();
@@ -2381,6 +2400,17 @@
       el.fmtRR.classList.toggle('active', state.format === 'rr');
       el.fmtBR.classList.toggle('active', state.format === 'br');
       switchView(forcedPresentView || state.view);
+    renderProfileList();
+  }
+
+  // Keep a presentation tab live-synced with whatever changes in the main tab,
+  // using the storage event that fires automatically in *other* tabs when localStorage changes.
+  window.addEventListener('storage', function(e){
+    if(e.key !== STORAGE_KEY || !e.newValue) return;
+    try{
+      state = JSON.parse(e.newValue);
+      normalizeState();
+      refreshAllFromState();
     }catch(err){ console.error('Could not sync from other tab:', err); }
   });
   document.addEventListener('click', function(e){
@@ -2410,6 +2440,7 @@
   function persistState(){
     if(!storageAvailable) return;
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+    scheduleSyncPush();
   }
 
   function loadPersistedState(){
@@ -2418,6 +2449,307 @@
       var raw = localStorage.getItem(STORAGE_KEY);
       return raw ? JSON.parse(raw) : null;
     }catch(e){ return null; }
+  }
+
+  // ---------- Cross-device sync ----------
+  // One shared tournament lives on a tiny server (see /server). Every device that has the
+  // same server URL + sync key reads and writes that one copy. No per-device logins.
+  // Saves use a revision number so two devices can't silently overwrite each other:
+  // if someone else saved first, this device adopts their version.
+  var SYNC_CFG_KEY = 'bracket_room_sync_v1';
+  var sync = { cfg: null, rev: 0, ready: false, dirty: false, busy: false, applying: false,
+               pushTimer: null, pollTimer: null, confirmAdopt: false, status: 'off' };
+
+  function loadSyncCfg(){
+    try{
+      var c = JSON.parse(localStorage.getItem(SYNC_CFG_KEY) || 'null');
+      if(c && c.url && c.key){ c.type = c.type === 'firebase' ? 'firebase' : 'worker'; return c; }
+      return null;
+    }catch(e){ return null; }
+  }
+  sync.cfg = storageAvailable ? loadSyncCfg() : null;
+
+  function isViewerDevice(){ return document.body.classList.contains('locked-view'); }
+
+  function syncReq(method, path, body){
+    return fetch(sync.cfg.url.replace(/\/+$/, '') + path, {
+      method: method,
+      headers: { 'Content-Type': 'application/json', 'X-Sync-Key': sync.cfg.key },
+      body: body ? JSON.stringify(body) : undefined,
+      cache: 'no-store'
+    }).then(function(res){
+      return res.json().catch(function(){ return {}; }).then(function(data){ return { status: res.status, data: data }; });
+    });
+  }
+
+
+  // ----- Backend: Firebase Realtime Database (plain REST, no SDK) -----
+  // Data lives at /rooms/<sha256(sync key)>.json as { rev, stateJson, updated }.
+  // The tournament is stored as ONE JSON string, because Firebase rejects some keys
+  // (for example usernames containing "." or "/") and silently drops empty arrays.
+  var fbRoom = null;
+  function fbRoomId(){
+    if(fbRoom && fbRoom.key === sync.cfg.key) return Promise.resolve(fbRoom.id);
+    if(!(window.crypto && window.crypto.subtle)) return Promise.reject(new Error('Firebase sync needs https.'));
+    return window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(sync.cfg.key)).then(function(buf){
+      var id = Array.from(new Uint8Array(buf)).map(function(b){ return b.toString(16).padStart(2, '0'); }).join('');
+      fbRoom = { key: sync.cfg.key, id: id };
+      return id;
+    });
+  }
+  function fbUrl(id, child){
+    return sync.cfg.url.replace(/\/+$/, '') + '/rooms/' + id + (child ? '/' + child : '') + '.json';
+  }
+  function fbFetch(url, opts){
+    opts = opts || {};
+    opts.cache = 'no-store';
+    return fetch(url, opts).then(function(res){
+      return res.text().then(function(t){
+        var data = null;
+        try{ data = t ? JSON.parse(t) : null; }catch(e){}
+        return { status: (res.status === 401 || res.status === 403) ? 401 : res.status, raw: res.status, data: data, etag: res.headers.get('ETag') };
+      });
+    });
+  }
+  function fbConflict(doc){
+    var st = null;
+    try{ st = doc && doc.stateJson ? JSON.parse(doc.stateJson) : null; }catch(e){}
+    return { status: 409, data: { conflict: true, rev: (doc && typeof doc.rev === 'number') ? doc.rev : 0, state: st } };
+  }
+  function fbPull(since){
+    return fbRoomId().then(function(id){
+      return fbFetch(fbUrl(id, 'rev')).then(function(r){
+        if(r.status === 401) return { status: 401, data: {} };
+        if(r.status !== 200) return { status: r.status, data: {} };
+        var rev = typeof r.data === 'number' ? r.data : 0;
+        if(rev === since) return { status: 200, data: { changed: false, rev: rev } };
+        if(rev === 0) return { status: 200, data: { changed: true, rev: 0, state: null } };
+        return fbFetch(fbUrl(id)).then(function(d){
+          if(d.status !== 200 || !d.data || !d.data.stateJson) return { status: d.status === 200 ? 502 : d.status, data: {} };
+          return { status: 200, data: { changed: true, rev: d.data.rev, state: JSON.parse(d.data.stateJson) } };
+        });
+      });
+    });
+  }
+  function fbPush(baseRev, st){
+    return fbRoomId().then(function(id){
+      var url = fbUrl(id);
+      // Ask for the ETag so the write can be made conditional (atomic). If the browser can't
+      // send/read it, fall back to a plain read: the revision check below still protects us.
+      return fbFetch(url, { headers: { 'X-Firebase-ETag': 'true' } }).catch(function(){ return fbFetch(url); }).then(function(cur){
+        if(cur.status !== 200) return { status: cur.status, data: {} };
+        var curRev = (cur.data && typeof cur.data.rev === 'number') ? cur.data.rev : 0;
+        if(curRev !== baseRev) return fbConflict(cur.data);
+        var body = JSON.stringify({ rev: baseRev + 1, stateJson: JSON.stringify(st), updated: Date.now() });
+        var put = function(withEtag){
+          // No Content-Type header on purpose: keeps this a "simple" request with no CORS preflight.
+          return fbFetch(url, { method: 'PUT', headers: (withEtag && cur.etag) ? { 'if-match': cur.etag } : {}, body: body });
+        };
+        return put(true).catch(function(){ return put(false); }).then(function(w){
+          if(w.raw === 412) return fbFetch(url).then(function(c2){ return fbConflict(c2.data); });
+          if(w.status === 200) return { status: 200, data: { ok: true, rev: baseRev + 1 } };
+          return { status: w.status, data: {} };
+        });
+      });
+    });
+  }
+
+  function backendPull(since){
+    return sync.cfg.type === 'firebase' ? fbPull(since) : syncReq('GET', '/state?since=' + since);
+  }
+  function backendPush(baseRev, st){
+    return sync.cfg.type === 'firebase' ? fbPush(baseRev, st) : syncReq('PUT', '/state', { baseRev: baseRev, state: st });
+  }
+  function rejectMsg(){
+    return sync.cfg && sync.cfg.type === 'firebase'
+      ? 'Firebase refused access. Check the database URL and that the rules were published.'
+      : 'The server rejected the sync key.';
+  }
+
+  function setSyncStatus(kind, msg){
+    sync.status = kind;
+    var n = document.getElementById('syncStatus');
+    if(n){ n.textContent = msg; n.setAttribute('data-sync', kind); }
+  }
+  function markSyncOk(){ setSyncStatus('ok', 'Connected. This tournament is shared across your devices.'); }
+  function markSyncOffline(){ setSyncStatus('offline', 'Offline. Changes will sync when the server is reachable.'); }
+
+  function localHasData(){
+    return !!(state.started || state.teams.length || state.profiles.length || state.fortniteUsers.length || state.watchUsers.length);
+  }
+  function userIsEditing(){
+    if(fnOverrideOpen) return true;
+    var a = document.activeElement;
+    return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !isViewerDevice());
+  }
+
+  // Replace this device's data with the shared copy and redraw everything.
+  function applyRemote(remoteState, rev){
+    sync.applying = true;
+    try{
+      state = remoteState;
+      normalizeState();
+      sync.rev = rev;
+      try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+      refreshAllFromState();
+      if(!isViewerDevice()){
+        el.tourneyName.value = state.name || 'Untitled Tournament';
+        el.matchTimeLimit.value = state.matchTimeLimit || '';
+        el.fnApiKey.value = state.fortniteApiKey || '';
+        el.fnPtsKill.value = state.fortnitePoints.perKill;
+        el.fnPtsWin.value = state.fortnitePoints.perWin;
+        el.fnGenMode.value = state.fortniteModeFilter;
+      }
+    } finally { sync.applying = false; }
+  }
+
+  function syncPull(initial){
+    return backendPull(initial ? -1 : sync.rev).then(function(r){
+      if(r.status === 401){ setSyncStatus('error', rejectMsg()); return null; }
+      if(r.status !== 200){ throw new Error('HTTP ' + r.status); }
+      return r.data;
+    });
+  }
+
+  function scheduleSyncPush(){
+    if(!sync.cfg || sync.applying || !sync.ready || isViewerDevice()) return;
+    clearTimeout(sync.pushTimer);
+    sync.pushTimer = setTimeout(syncPush, 500);
+  }
+
+  function syncPush(){
+    if(!sync.cfg || !sync.ready || isViewerDevice()) return Promise.resolve();
+    if(sync.busy){ sync.dirty = true; return Promise.resolve(); }
+    sync.busy = true;
+    sync.dirty = false;
+    return backendPush(sync.rev, state).then(function(r){
+      if(r.status === 200){ sync.rev = r.data.rev; markSyncOk(); }
+      else if(r.status === 409 && r.data.state){
+        applyRemote(r.data.state, r.data.rev);
+        markSyncOk();
+        showToast('Another device saved at the same moment. Showing the latest shared version.', true);
+      }
+      else if(r.status === 413){ setSyncStatus('error', 'Too much data to sync (limit about 1.5 MB).'); }
+      else if(r.status === 401){ setSyncStatus('error', rejectMsg()); }
+      else { throw new Error('HTTP ' + r.status); }
+    }).catch(function(){
+      sync.dirty = true;
+      markSyncOffline();
+    }).then(function(){
+      sync.busy = false;
+      if(sync.dirty && sync.status !== 'offline' && sync.status !== 'error') scheduleSyncPush();
+    });
+  }
+
+  function startSync(){
+    if(!sync.cfg || !storageAvailable) return;
+    setSyncStatus('busy', 'Connecting…');
+    syncPull(true).then(function(d){
+      if(!d) return;
+      if(d.rev === 0 || !d.state){
+        // Nothing on the server yet: this device's tournament becomes the shared one.
+        sync.rev = 0; sync.ready = true;
+        if(!isViewerDevice()) return syncPush();
+        markSyncOk();
+        return;
+      }
+      if(sync.confirmAdopt && !isViewerDevice() && localHasData() &&
+         !window.confirm('A shared tournament already exists on the server.\n\nOK = replace this device\'s data with the shared one.\nCancel = overwrite the shared one with this device\'s data.')){
+        sync.rev = d.rev; sync.ready = true;
+        return syncPush();
+      }
+      applyRemote(d.state, d.rev);
+      sync.ready = true;
+      markSyncOk();
+    }).catch(markSyncOffline).then(function(){ sync.confirmAdopt = false; schedulePoll(); });
+  }
+
+  function schedulePoll(){
+    clearTimeout(sync.pollTimer);
+    if(!sync.cfg) return;
+    sync.pollTimer = setTimeout(pollTick, document.hidden ? 15000 : 4000);
+  }
+
+  function pollTick(){
+    if(!sync.cfg) return;
+    if(!sync.ready){ startSync(); return; }
+    if(sync.busy){ schedulePoll(); return; }
+    if(sync.dirty){ syncPush().then(schedulePoll); return; }
+    syncPull(false).then(function(d){
+      if(!d) return;
+      if(d.changed && d.state && !userIsEditing()){ applyRemote(d.state, d.rev); }
+      if(sync.status !== 'ok') markSyncOk();
+    }).catch(markSyncOffline).then(schedulePoll);
+  }
+
+  document.addEventListener('visibilitychange', function(){
+    if(!document.hidden && sync.cfg && sync.ready){ clearTimeout(sync.pollTimer); pollTick(); }
+  });
+
+  // ----- Sync sidebar UI -----
+  function syncEl(id){ return document.getElementById(id); }
+  function renderSyncUi(){
+    if(!syncEl('syncUrl')) return;
+    if(sync.cfg) syncEl('syncType').value = sync.cfg.type;
+    applySyncTypeLabels();
+    syncEl('syncUrl').value = sync.cfg ? sync.cfg.url : syncEl('syncUrl').value;
+    syncEl('syncKey').value = sync.cfg ? sync.cfg.key : syncEl('syncKey').value;
+    syncEl('syncDisconnectBtn').style.display = sync.cfg ? '' : 'none';
+    syncEl('syncCopyBtn').style.display = sync.cfg ? '' : 'none';
+    syncEl('syncConnectBtn').textContent = sync.cfg ? 'Reconnect' : 'Connect';
+    if(!sync.cfg) setSyncStatus('off', 'Not connected. Data is saved on this device only.');
+  }
+
+  function applySyncTypeLabels(){
+    var fb = syncEl('syncType').value === 'firebase';
+    syncEl('syncUrlLabel').textContent = fb ? 'Firebase database URL' : 'Server URL';
+    syncEl('syncUrl').placeholder = fb ? 'https://your-project-default-rtdb.firebaseio.com' : 'https://bracket-sync.your-name.workers.dev';
+  }
+
+  function randomSyncKey(){
+    var bytes = new Uint8Array(18);
+    (window.crypto || window.msCrypto).getRandomValues(bytes);
+    return btoa(String.fromCharCode.apply(null, bytes)).replace(/\+/g, '-').replace(/\//g, '_');
+  }
+
+  function wireSyncUi(){
+    if(!syncEl('syncUrl')) return;
+    syncEl('syncType').addEventListener('change', applySyncTypeLabels);
+    syncEl('syncGenBtn').addEventListener('click', function(){
+      syncEl('syncKey').value = randomSyncKey();
+      syncEl('syncKey').type = 'text'; // show it once so it can be noted down
+    });
+    syncEl('syncConnectBtn').addEventListener('click', function(){
+      var url = syncEl('syncUrl').value.trim().replace(/\/+$/, '');
+      var key = syncEl('syncKey').value.trim();
+      if(!/^https:\/\//i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)/i.test(url)){
+        showToast('Enter the full server URL, starting with https://', true); return;
+      }
+      if(key.length < 16){ showToast('The sync key must be at least 16 characters. Click Generate on your first device.', true); return; }
+      sync.cfg = { url: url, key: key, type: syncEl('syncType').value === 'firebase' ? 'firebase' : 'worker' };
+      try{ localStorage.setItem(SYNC_CFG_KEY, JSON.stringify(sync.cfg)); }catch(e){}
+      sync.ready = false; sync.rev = 0; sync.dirty = false; sync.confirmAdopt = true;
+      renderSyncUi();
+      startSync();
+    });
+    syncEl('syncDisconnectBtn').addEventListener('click', function(){
+      clearTimeout(sync.pollTimer); clearTimeout(sync.pushTimer);
+      sync.cfg = null; sync.ready = false; sync.dirty = false; fbRoom = null;
+      try{ localStorage.removeItem(SYNC_CFG_KEY); }catch(e){}
+      syncEl('syncUrl').value = ''; syncEl('syncKey').value = ''; syncEl('syncKey').type = 'password';
+      renderSyncUi();
+      showToast('Disconnected. This device keeps its own copy from now on.');
+    });
+    syncEl('syncCopyBtn').addEventListener('click', function(){
+      if(!sync.cfg) return;
+      var code = btoa(JSON.stringify({ u: sync.cfg.url, k: sync.cfg.key, t: sync.cfg.type })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      var link = location.href.split('#')[0] + '#sync=' + code;
+      var done = function(){ showToast('Link copied. Anyone with it can edit your tournament, so keep it private.'); };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(link).then(done, function(){ window.prompt('Copy this link:', link); });
+      } else { window.prompt('Copy this link:', link); }
+    });
+    renderSyncUi();
   }
 
   function repairAndResyncIds(){
@@ -2608,4 +2940,7 @@
     }
     document.body.classList.add('present', 'locked-view');
   }
+
+  wireSyncUi();
+  startSync();
 })();
