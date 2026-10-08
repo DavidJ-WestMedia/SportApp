@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0d12">
+<title>Bracket Room — Tournament Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="tournament.css">
+</head>
+<body>
+
+<noscript>
+  <div class="noscript-note">Bracket Room needs JavaScript to run. Please enable it and reload the page.</div>
+</noscript>
+
+<!-- ============ Admin login gate ============ -->
+<div id="passwordGate" class="password-gate" role="dialog" aria-modal="true" aria-label="Admin login">
+  <form id="gateForm" class="gate-card">
+    <div class="brand brand-center"><span class="dot" aria-hidden="true"></span><span class="brand-name">Bracket Room</span></div>
+
+    <!-- Setup mode: no admins exist yet -->
+    <div id="gateSetupFields" class="stack">
+      <p class="gate-message">Create the first admin account.</p>
+      <input id="gateSetupName" type="text" class="form-control" placeholder="Admin name" aria-label="Admin name" autocomplete="username">
+      <input id="gateSetupPassword" type="password" class="form-control" placeholder="Password" aria-label="Password" autocomplete="new-password">
+      <input id="gateSetupConfirm" type="password" class="form-control" placeholder="Confirm password" aria-label="Confirm password" autocomplete="new-password">
+    </div>
+
+    <!-- Login mode: pick an existing admin and enter their password -->
+    <div id="gateLoginFields" class="stack" style="display:none;">
+      <p class="gate-message">Select your admin account.</p>
+      <select id="gateLoginAdmin" class="form-select" aria-label="Admin account"></select>
+      <input id="gateLoginPassword" type="password" class="form-control" placeholder="Password" aria-label="Password" autocomplete="current-password">
+    </div>
+
+    <div id="gateError" class="gate-error" role="alert"></div>
+    <button type="submit" class="btn btn-accent btn-full" id="gateSubmitBtn">Create admin</button>
+  </form>
+</div>
+
+<!-- ============ Top bar ============ -->
+<header class="top-game-bar">
+  <div class="top-game-bar-inner" role="group" aria-label="Game">
+    <span class="top-game-bar-label">Game</span>
+    <button type="button" id="gameGeneral" class="top-game-btn active">General</button>
+    <button type="button" id="gameFortnite" class="top-game-btn">Fortnite</button>
+    <button type="button" id="gameChess" class="top-game-btn">Chess</button>
+  </div>
+
+  <div class="admin-menu-wrap" id="adminMenuWrap">
+    <button type="button" class="admin-menu-btn" id="adminMenuBtn" aria-haspopup="true" aria-expanded="false">
+      <span aria-hidden="true">👤</span> <span id="adminMenuName">Admin</span> <span aria-hidden="true">▾</span>
+    </button>
+    <div class="admin-menu-dropdown" id="adminMenuDropdown" style="display:none;">
+      <div class="admin-menu-section-label">Admins</div>
+      <div id="adminMenuList"></div>
+      <button type="button" class="admin-menu-item" id="adminMenuAddToggle">+ Add admin</button>
+
+      <div id="adminAddForm" class="stack" style="display:none;">
+        <input id="newAdminName" type="text" class="form-control" placeholder="Name" aria-label="New admin name" autocomplete="off">
+        <input id="newAdminPassword" type="password" class="form-control" placeholder="Password" aria-label="New admin password" autocomplete="new-password">
+        <input id="newAdminConfirm" type="password" class="form-control" placeholder="Confirm password" aria-label="Confirm new admin password" autocomplete="new-password">
+        <div id="adminAddError" class="gate-error" role="alert"></div>
+        <button type="button" class="btn btn-accent btn-full" id="adminAddSubmitBtn">Create admin</button>
+      </div>
+
+      <hr class="admin-menu-divider">
+      <button type="button" class="admin-menu-item danger" id="adminMenuLogoutBtn">Log out</button>
+    </div>
+  </div>
+</header>
+
+<div class="app">
+  <aside class="sidebar" aria-label="Tournament settings">
+    <div class="brand-row">
+      <button type="button" id="profilesMenuBtn" class="hamburger-btn" title="Player profiles" aria-label="Open player profiles" aria-controls="profilesPanel" aria-expanded="false">☰</button>
+      <div class="brand"><span class="dot" aria-hidden="true"></span><span class="brand-name">Bracket Room</span></div>
+    </div>
+    <div class="brand-sub">Set up teams, run the tournament, show the room.</div>
+
+    <div class="field">
+      <label for="tourneyName">Tournament name</label>
+      <input id="tourneyName" type="text" class="tourney-title-input form-control" value="Summer Cup" maxlength="60">
+    </div>
+
+    <hr class="div">
+
+    <div id="teamToolsSection">
+      <div class="field">
+        <span class="field-label" id="formatLabel">Format</span>
+        <div class="format-toggle" role="group" aria-labelledby="formatLabel">
+          <button type="button" id="fmtElim" class="active">Elimination</button>
+          <button type="button" id="fmtRR">Round robin</button>
+          <button type="button" id="fmtBR">Battle royale</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="matchTimeLimit">Match time limit (optional)</label>
+        <input id="matchTimeLimit" type="text" placeholder="e.g. 20 min halves, 10 min per game" class="form-control">
+      </div>
+
+      <!-- Fortnite bracket setup: only visible when the Fortnite game is selected -->
+      <div id="fnGenSetup" class="fn-gen-setup" style="display:none;">
+        <div class="section-label">Fortnite bracket setup</div>
+        <div class="field">
+          <label for="fnGenMode">Target mode</label>
+          <select id="fnGenMode" class="form-select">
+            <option value="all">All Modes</option>
+            <option value="solo">Solo Only</option>
+            <option value="duo">Duo Only</option>
+            <option value="trio">Trio Only</option>
+            <option value="squad">Squad Only</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="field-label" id="fnSessionLabel">Session</span>
+          <div class="format-toggle" role="group" aria-labelledby="fnSessionLabel">
+            <button type="button" id="fnSessBuild" class="active">Build</button>
+            <button type="button" id="fnSessNoBuild">No Build</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="fnSnapshotSelect">Window start (snapshot)</label>
+          <select id="fnSnapshotSelect" class="form-select">
+            <option value="">New baseline (captured when you generate)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="fnEndSnapshotSelect">Window end</label>
+          <select id="fnEndSnapshotSelect" class="form-select">
+            <option value="">Live (now)</option>
+          </select>
+        </div>
+        <div class="section-note" id="fnGenNote"></div>
+      </div>
+
+      <hr class="div">
+
+      <div class="section-label">Add a team</div>
+      <div class="add-row">
+        <input id="newTeamName" type="text" placeholder="Team name" aria-label="Team name" class="form-control" maxlength="40">
+        <div class="inline">
+          <input id="newTeamHost" type="text" placeholder="Host / venue (optional)" aria-label="Host or venue" class="form-control" maxlength="40">
+        </div>
+        <div class="color-pick" id="colorPick" role="group" aria-label="Team color"></div>
+        <button type="button" class="btn btn-accent btn-full" id="addTeamBtn">Add team</button>
+      </div>
+
+      <div class="section-label">Teams (<span id="teamCount">0</span>)</div>
+      <div class="row-list" id="teamList"></div>
+
+      <button type="button" class="btn btn-full" id="startBtn">Generate bracket</button>
+
+      <hr class="div">
+    </div>
+
+    <div id="fortniteToolsSection" style="display:none;">
+      <div class="section-label">Pull Fortnite stats</div>
+      <div class="field">
+        <label for="fnApiKey">Fortnite-API.com key</label>
+        <input id="fnApiKey" type="text" placeholder="Paste your free API key" class="form-control" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="section-note">Free key at fortnite-api.com/profile (sign in with Discord). It is stored only in this browser and in your export file.</div>
+      <div class="add-row">
+        <input id="newFnUser" type="text" placeholder="Epic username" aria-label="Epic username" class="form-control">
+        <button type="button" class="btn btn-accent btn-full" id="addFnUserBtn">Track player</button>
+      </div>
+      <div class="row-list" id="fnUserList"></div>
+      <div class="field">
+        <span class="field-label" id="fnPointsLabel">Tournament points formula</span>
+        <div class="inline" role="group" aria-labelledby="fnPointsLabel">
+          <input id="fnPtsKill" type="number" min="0" step="0.5" value="1" aria-label="Points per kill" class="form-control">
+          <input id="fnPtsWin" type="number" min="0" step="0.5" value="5" aria-label="Points per win" class="form-control">
+        </div>
+        <div class="inline field-hints">
+          <span>pts / kill</span>
+          <span>pts / win</span>
+        </div>
+      </div>
+      <div class="field">
+        <label for="fnBaselineDate">Snapshot label (date &amp; time)</label>
+        <input id="fnBaselineDate" type="datetime-local" class="form-control">
+      </div>
+      <div class="util-row">
+        <button type="button" class="btn btn-accent btn-full" id="fnBaselineBtn">Capture snapshot</button>
+      </div>
+      <div class="util-row">
+        <button type="button" class="btn btn-full" id="fnClearBaselineBtn">Delete start snapshot</button>
+      </div>
+      <div class="section-note">Each click pulls Fortnite's <strong>current</strong> numbers (the API cannot look up past stats) and saves them as a snapshot. The first snapshot in a session becomes the window start. Points only ever count the change from the window start to now (live) or to the window end snapshot you pick above. Capture one right before you start, and another when you finish if you want to freeze the window.</div>
+      <div class="util-row">
+        <button type="button" class="btn btn-full" id="fnRefreshBtn">Refresh stats</button>
+      </div>
+      <label class="check-row"><input type="checkbox" id="fnAutoRefreshChk" checked class="form-check-input"> Auto-refresh every 45 s</label>
+      <hr class="div">
+    </div>
+
+    <div id="chessToolsSection" style="display:none;">
+      <div class="section-label">Track Chess.com players</div>
+      <div class="add-row">
+        <input id="newChessUser" type="text" placeholder="Chess.com username" aria-label="Chess.com username" class="form-control">
+        <button type="button" class="btn btn-accent btn-full" id="addChessUserBtn">Track player</button>
+      </div>
+      <div class="row-list" id="chessUserList"></div>
+
+      <hr class="div">
+
+      <div class="section-label">Scoring by time control</div>
+      <div class="add-row">
+        <div class="inline">
+          <select id="tcBase" class="form-select" aria-label="Base time">
+            <option value="180">3 min (Blitz)</option>
+            <option value="300">5 min (Blitz)</option>
+            <option value="600" selected>10 min (Rapid)</option>
+            <option value="900">15 min (Rapid)</option>
+            <option value="1200">20 min (Rapid)</option>
+            <option value="1800">30 min (Rapid)</option>
+          </select>
+          <input id="tcIncrement" type="text" inputmode="numeric" placeholder="Increment (sec)" aria-label="Increment in seconds" value="0" class="form-control">
+        </div>
+        <input id="tcSince" type="datetime-local" aria-label="Only count games after" class="form-control">
+        <button type="button" class="btn btn-accent btn-full" id="applyTcBtn">Apply &amp; pull scores</button>
+      </div>
+      <div class="util-row">
+        <button type="button" class="btn btn-full" id="refreshChessBtn">Refresh scores</button>
+      </div>
+      <label class="check-row"><input type="checkbox" id="autoRefreshChk" checked class="form-check-input"> Auto-refresh every 45 s</label>
+      <div class="section-note">Pulls each tracked player's finished games at this exact time control and tallies wins, draws and losses (optionally only games after the date and time above) — a running scoreboard for a Rapid or Blitz tournament as results arrive on Chess.com.</div>
+
+      <hr class="div">
+    </div>
+
+    <div class="util-row">
+      <button type="button" class="btn" id="exportBtn">Export</button>
+      <button type="button" class="btn" id="importBtn">Import</button>
+      <button type="button" class="btn btn-ghost" id="resetBtn">Reset</button>
+    </div>
+    <div class="section-note" id="autosaveNote"></div>
+    <input type="file" id="importFile" accept="application/json,.json" style="display:none" aria-label="Import a tournament file">
+  </aside>
+
+  <main class="stage">
+    <div class="stage-header">
+      <div>
+        <h1 class="stage-title" id="stageTitle">Summer Cup</h1>
+        <div class="stage-meta" id="stageMeta">Add teams to get started.</div>
+      </div>
+      <div class="stage-actions">
+        <div class="tabs" role="tablist" aria-label="View">
+          <button type="button" role="tab" class="tab active" data-view="main" id="tabMain" aria-selected="true">Bracket</button>
+          <button type="button" role="tab" class="tab" data-view="live" id="tabLive" aria-selected="false">Scores</button>
+        </div>
+        <button type="button" class="btn btn-accent enter-present" id="presentBtn">Present</button>
+      </div>
+    </div>
+
+    <section id="bracketView" aria-live="polite"></section>
+    <section id="standingsView" style="display:none;"></section>
+    <section id="brView" style="display:none;"></section>
+    <section id="liveView" style="display:none;"></section>
+  </main>
+</div>
+
+<!--
+  Player-profiles drawer and its backdrop live at the top level of <body>,
+  NOT inside .sidebar: the sidebar is position:sticky, which creates its own
+  stacking context and would trap the drawer underneath the backdrop and top bar.
+-->
+<div id="profilesPanelBackdrop" class="panel-backdrop"></div>
+<aside id="profilesPanel" class="profiles-panel" role="dialog" aria-modal="true" aria-labelledby="profilesPanelTitle" aria-hidden="true">
+  <div class="profiles-panel-head">
+    <h2 id="profilesPanelTitle">Player profiles</h2>
+    <button type="button" class="profiles-panel-close" id="profilesPanelClose" title="Close" aria-label="Close player profiles">✕</button>
+  </div>
+  <div class="add-row">
+    <input id="newProfileName" type="text" placeholder="Name" aria-label="Profile name" class="form-control" maxlength="40">
+    <div class="inline">
+      <input id="newProfileChess" type="text" placeholder="Chess.com username (optional)" aria-label="Chess.com username" class="form-control">
+    </div>
+    <div class="inline">
+      <input id="newProfileEpic" type="text" placeholder="Epic username (optional)" aria-label="Epic username" class="form-control">
+    </div>
+    <div class="photo-row">
+      <div class="photo-preview empty" id="newProfilePhotoPreview"></div>
+      <label class="btn photo-pick-btn" for="newProfilePhoto">Add photo</label>
+      <input id="newProfilePhoto" type="file" accept="image/*" style="display:none;">
+      <button type="button" class="btn-danger-text" id="newProfilePhotoClear" style="display:none;">Remove</button>
+    </div>
+    <div class="color-pick" id="profileColorPick" role="group" aria-label="Profile color"></div>
+    <button type="button" class="btn btn-accent btn-full" id="addProfileBtn">Add profile</button>
+  </div>
+  <div class="row-list" id="profileList"></div>
+  <div class="section-note">Set someone up once here, then use the buttons on their card to add them as a team or start tracking them on Chess.com / Fortnite — no retyping. Each card shows their Chess.com and Fortnite stats once tracked.</div>
+</aside>
+
+<div class="exit-present-bar">
+  <button type="button" class="btn btn-accent" id="exitPresentBtn">Exit present mode</button>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="tournament.js"></script>
+</body>
+</html>
